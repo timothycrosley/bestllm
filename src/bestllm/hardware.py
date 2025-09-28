@@ -1,132 +1,147 @@
-"""Hardware introspection utilities for bestllm."""
-from __future__ import annotations
+"""hardware.py
 
-from dataclasses import dataclass
-import os
+A set of light weight cross-plaform functions to aid in determining the hardware available on the current running device.
+This data can then be used to help determine what local llm should be recommended for the user's available hardware.
+"""
+import ctypes
 import shutil
-import subprocess
-from typing import Optional
+import os
+import sys
+from ctypes import Structure, byref, c_char, c_int, c_int64, c_size_t, c_void_p, POINTER, sizeof, c_ulonglong, c_uint64
 
 
-@dataclass(frozen=True)
-class HardwareSpecs:
-    """Snapshot of the user's hardware relevant to local LLM selection."""
-
-    total_ram_gb: float
-    cpu_physical_cores: int
-    gpu_vram_gb: Optional[float] = None
-
-    @property
-    def has_gpu(self) -> bool:
-        """Return True if a GPU with at least 1GB of VRAM is available."""
-        return (self.gpu_vram_gb or 0) >= 1.0
-
-    @classmethod
-    def from_system(cls) -> "HardwareSpecs":
-        """Collect hardware information from the current machine."""
-        total_ram = _detect_total_ram_gb()
-        if total_ram is None:
-            raise RuntimeError(
-                "Unable to detect total system RAM; provide HardwareSpecs manually."
-            )
-
-        cpu_cores = _detect_cpu_core_count()
-        gpu_vram = _detect_gpu_vram_gb()
-        return cls(
-            total_ram_gb=total_ram,
-            cpu_physical_cores=cpu_cores,
-            gpu_vram_gb=gpu_vram,
-        )
-
-
-def _detect_total_ram_gb() -> Optional[float]:
-    for detector in (_psutil_total_ram_gb, _sysconf_total_ram_gb):
-        value = detector()
-        if value is not None:
-            return value
-    return None
-
-
-def _psutil_total_ram_gb() -> Optional[float]:
+def get_available_disk_space() -> int:
+    """Returns the available disk space in bytes on the current disk, or 0 if undetermined."""
     try:
-        import psutil  # type: ignore
-    except ImportError:  # pragma: no cover - psutil rarely present in CI
-        return None
+        return shutil.disk_usage('.').free
+    except Exception:
+        return 0
 
+
+def cpu_core_count() -> int:
+    """Returns the number of logical CPU cores available, or 0 if undetermined."""
+    return os.cpu_count() or 0
+
+
+def ram() -> int:
+    """Returns the total physical system RAM in MB, or 0 if unable to determine."""
     try:
-        total_bytes = psutil.virtual_memory().total
-    except Exception:  # pragma: no cover - defensive
-        return None
-    return _bytes_to_gb(total_bytes)
+        if os.name == 'nt':  # Windows
+            kernel32 = ctypes.windll.kernel32
+            mem_kb = c_ulonglong()
+            if kernel32.GetPhysicallyInstalledSystemMemory(byref(mem_kb)):
+                return mem_kb.value // 1024
+        elif sys.platform == 'linux':  # Linux
+            with open('/proc/meminfo') as f:
+                for line in f:
+                    if line.startswith('MemTotal:'):
+                        return int(line.split()[1]) // 1024
+        elif sys.platform == 'darwin':  # macOS
+            libc = ctypes.CDLL('libc.dylib')
+            val = c_uint64()
+            size = c_size_t(sizeof(c_uint64))
+            libc.sysctlbyname(b'hw.memsize', byref(val), byref(size), None, 0)
+            return val.value // (1024 * 1024)
+    except Exception:
+        pass
+    return 0
 
 
-def _sysconf_total_ram_gb() -> Optional[float]:
-    try:
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        page_count = os.sysconf("SC_PHYS_PAGES")
-    except (AttributeError, ValueError, OSError):
-        return None
-    if page_size <= 0 or page_count <= 0:
-        return None
-    return _bytes_to_gb(page_size * page_count)
+def local_llm_vram() -> int:
+    """Returns the amount of VRAM available from a GPU capable of running local models.
+    If none is available (for instance no gpu found capable of acceleration) 0 is returned.
+    Otherwise, the number of mb is returned.
+    """
+    if os.name == 'nt':  # Windows
+        cuda_libs = [f'cudart64_{v}.dll' for v in range(130, 79, -1)]  # Updated to include CUDA 13.0+
+        rocm_libs = ['amdhip64.dll']
+    else:  # Linux/Mac (posix)
+        cuda_libs = ['libcudart.so']
+        rocm_libs = ['libamdhip64.so']
 
-
-def _detect_cpu_core_count() -> int:
-    try:
-        import psutil  # type: ignore
-    except ImportError:
-        psutil = None  # type: ignore
-
-    if psutil is not None:
+    # Check CUDA or ROCm/HIP
+    for libname in cuda_libs + rocm_libs:
         try:
-            cores = psutil.cpu_count(logical=False)
-            if cores:
-                return cores
-        except Exception:  # pragma: no cover - defensive
+            lib = ctypes.CDLL(libname)
+            if libname in cuda_libs or 'cudart' in libname:
+                print("NVIDIA GPU detected")
+                try:
+                    get_count, get_props = _configure_api(lib, 'cuda')
+                    count = c_int()
+                    err = lib[get_count](byref(count))
+                    if err != 0 or count.value == 0:
+                        continue
+                    total_vram = 0
+                    for i in range(count.value):
+                        prop = _DeviceProp()
+                        err = lib[get_props](byref(prop), i)
+                        if err == 0:
+                            total_vram += prop.totalGlobalMem
+                    return total_vram // (1024 * 1024)
+                except:
+                    print("Unable to determine VRAM for NVIDIA GPU")
+                    return 0
+            else:
+                print("AMD GPU detected")
+                try:
+                    get_count, get_props = _configure_api(lib, 'hip')
+                    count = c_int()
+                    err = lib[get_count](byref(count))
+                    if err != 0 or count.value == 0:
+                        continue
+                    total_vram = 0
+                    for i in range(count.value):
+                        prop = _DeviceProp()
+                        err = lib[get_props](byref(prop), i)
+                        if err == 0:
+                            total_vram += prop.totalGlobalMem
+                    return total_vram // (1024 * 1024)
+                except:
+                    print("Unable to determine VRAM for AMD GPU")
+                    return 0
+
+        except OSError:
             pass
 
-    cores = os.cpu_count()
-    if cores is None or cores < 1:
-        return 1
-    return cores
-
-
-def _detect_gpu_vram_gb() -> Optional[float]:
-    nvidia_smi = shutil.which("nvidia-smi")
-    if not nvidia_smi:
-        return None
-
-    try:
-        result = subprocess.run(
-            [
-                nvidia_smi,
-                "--query-gpu=memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):  # pragma: no cover - defensive
-        return None
-
-    values = []
-    for line in result.stdout.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
+    # Check Metal on macOS
+    if sys.platform == 'darwin':
         try:
-            values.append(float(stripped))
-        except ValueError:  # pragma: no cover - defensive
-            return None
+            metal_lib = ctypes.CDLL('/System/Library/Frameworks/Metal.framework/Metal')
+            metal_lib.MTLCreateSystemDefaultDevice.restype = c_void_p
+            device = metal_lib.MTLCreateSystemDefaultDevice()
+            if device:
+                print("Apple Silicon detected")
+                try:
+                    objc_lib = ctypes.CDLL('/usr/lib/libobjc.A.dylib')
+                    sel = objc_lib.sel_registerName(b"recommendedMaxVRAM")
+                    objc_lib.objc_msgSend.restype = c_int64
+                    objc_lib.objc_msgSend.argtypes = [c_void_p, c_void_p]
+                    vram_bytes = objc_lib.objc_msgSend(device, sel)
+                    if vram_bytes > 0:
+                        return vram_bytes // (1024 * 1024)
+                except:
+                    print("Unable to determine universal memory for Apple Silicon")
 
-    if not values:
-        return None
-    return round(max(values), 1)
+        except OSError:
+            pass
+
+    print("No GPU found capable of accelerating local LLMs")
+    return 0
 
 
-def _bytes_to_gb(value: int) -> float:
-    return round(value / (1024 ** 3), 1)
+class _DeviceProp(Structure):
+    """Shared structure for CUDA/HIP device properties (minimal fields)."""
+    _fields_ = [
+        ("name", c_char * 256),
+        ("totalGlobalMem", c_size_t),
+    ]
 
 
-__all__ = ["HardwareSpecs"]
+def _configure_api(lib, prefix):
+    get_device_count = prefix + 'GetDeviceCount'
+    get_device_props = prefix + 'GetDeviceProperties'
+    lib[get_device_count].restype = c_int
+    lib[get_device_count].argtypes = [POINTER(c_int)]
+    lib[get_device_props].restype = c_int
+    lib[get_device_props].argtypes = [POINTER(_DeviceProp), c_int]
+    return get_device_count, get_device_props
