@@ -8,9 +8,18 @@ import shutil
 import os
 import sys
 from ctypes import Structure, byref, c_char, c_int, c_int64, c_size_t, c_void_p, POINTER, sizeof, c_ulonglong, c_uint64
+from enum import Enum
 
 
-def get_available_disk_space() -> int:
+class GPU(Enum):
+    """Represents the kind of GPU that was identified as likely being able accelerate local LLMs."""
+    UNKNOWN = 0
+    NVIDIA = 1
+    AMD = 2
+    APPLE_SILICON = 3
+
+
+def available_disk_space() -> int:
     """Returns the available disk space in bytes on the current disk, or 0 if undetermined."""
     try:
         return shutil.disk_usage('.').free
@@ -47,10 +56,10 @@ def ram() -> int:
     return 0
 
 
-def local_llm_vram() -> int:
-    """Returns the amount of VRAM available from a GPU capable of running local models.
-    If none is available (for instance no gpu found capable of acceleration) 0 is returned.
-    Otherwise, the number of mb is returned.
+def local_llm_vram() -> (GPU, int):
+    """Returns an identified GPU capable of running local models if one is found alongside its VRAM.
+    If none is available (for instance no gpu found capable of acceleration) (NONE, 0) is returned.
+    The amount of VRAM is returned in mb.
     """
     if os.name == 'nt':  # Windows
         cuda_libs = [f'cudart64_{v}.dll' for v in range(130, 79, -1)]  # Updated to include CUDA 13.0+
@@ -77,10 +86,10 @@ def local_llm_vram() -> int:
                         err = lib[get_props](byref(prop), i)
                         if err == 0:
                             total_vram += prop.totalGlobalMem
-                    return total_vram // (1024 * 1024)
+                    return (GPU.NVIDIA, total_vram // (1024 * 1024))
                 except:
                     print("Unable to determine VRAM for NVIDIA GPU")
-                    return 0
+                    return (GPU.NVIDIA, 0)
             else:
                 print("AMD GPU detected")
                 try:
@@ -95,10 +104,10 @@ def local_llm_vram() -> int:
                         err = lib[get_props](byref(prop), i)
                         if err == 0:
                             total_vram += prop.totalGlobalMem
-                    return total_vram // (1024 * 1024)
+                    return (GPU.AMD, total_vram // (1024 * 1024))
                 except:
                     print("Unable to determine VRAM for AMD GPU")
-                    return 0
+                    return (GPU.AMD, 0)
 
         except OSError:
             pass
@@ -118,15 +127,16 @@ def local_llm_vram() -> int:
                     objc_lib.objc_msgSend.argtypes = [c_void_p, c_void_p]
                     vram_bytes = objc_lib.objc_msgSend(device, sel)
                     if vram_bytes > 0:
-                        return vram_bytes // (1024 * 1024)
+                        return (GPU.APPLE, vram_bytes // (1024 * 1024))
                 except:
                     print("Unable to determine universal memory for Apple Silicon")
+                    return (GPU.APPLE, 0)
 
         except OSError:
             pass
 
     print("No GPU found capable of accelerating local LLMs")
-    return 0
+    return (GPU.UNKNOWN, 0)
 
 
 class _DeviceProp(Structure):
