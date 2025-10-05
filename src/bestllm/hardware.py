@@ -138,7 +138,7 @@ def _check_runtime_libraries() -> tuple[GPU, int]:
                 if err == 0:
                     total_vram += prop.totalGlobalMem
             return (GPU.NVIDIA, total_vram // (1024 * 1024))
-        except:
+        except Exception:
             pass
 
     # Check ROCm/HIP
@@ -157,7 +157,7 @@ def _check_runtime_libraries() -> tuple[GPU, int]:
                 if err == 0:
                     total_vram += prop.totalGlobalMem
             return (GPU.AMD, total_vram // (1024 * 1024))
-        except:
+        except Exception:
             pass
 
     return (GPU.UNKNOWN, 0)
@@ -173,7 +173,7 @@ def _check_system_tools_linux() -> tuple[GPU, int]:
         if result.returncode == 0:
             vram_mb = sum(int(line.strip()) for line in result.stdout.strip().split('\n') if line.strip())
             return (GPU.NVIDIA, vram_mb)
-    except:
+    except Exception:
         pass
 
     # Try rocm-smi
@@ -185,7 +185,7 @@ def _check_system_tools_linux() -> tuple[GPU, int]:
             if matches:
                 total_bytes = sum(int(m) for m in matches)
                 return (GPU.AMD, total_bytes // (1024 * 1024))
-    except:
+    except Exception:
         pass
 
     # Check /sys filesystem for AMD GPUs (works without ROCm)
@@ -212,7 +212,7 @@ def _check_system_tools_linux() -> tuple[GPU, int]:
                                         with open(mem_info_file, 'r') as f:
                                             vram_bytes = int(f.read().strip())
                                             return (GPU.NVIDIA, vram_bytes // (1024 * 1024))
-    except:
+    except Exception:
         pass
 
     return (GPU.UNKNOWN, 0)
@@ -228,7 +228,7 @@ def _check_system_tools_windows() -> tuple[GPU, int]:
         if result.returncode == 0:
             vram_mb = sum(int(line.strip()) for line in result.stdout.strip().split('\n') if line.strip())
             return (GPU.NVIDIA, vram_mb)
-    except:
+    except Exception:
         pass
 
     # Try WMIC for GPU detection
@@ -253,7 +253,7 @@ def _check_system_tools_windows() -> tuple[GPU, int]:
                         vram_bytes = int(match.group(1))
                         if vram_bytes > 1024:  # Likely in bytes
                             return (GPU.AMD, vram_bytes // (1024 * 1024))
-    except:
+    except Exception:
         pass
 
     return (GPU.UNKNOWN, 0)
@@ -274,9 +274,9 @@ def _check_metal() -> tuple[GPU, int]:
                 vram_bytes = objc_lib.objc_msgSend(device, sel)
                 if vram_bytes > 0:
                     return (GPU.APPLE_SILICON, vram_bytes // (1024 * 1024))
-            except:
+            except Exception:
                 pass
-    except:
+    except Exception:
         pass
 
     return (GPU.UNKNOWN, 0)
