@@ -3,12 +3,28 @@
 A set of light weight cross-plaform functions to aid in determining the hardware available on the current running device.
 This data can then be used to help determine what local llm should be recommended for the user's available hardware.
 """
+from __future__ import annotations
+from functools import lru_cache
 import ctypes
 import shutil
 import os
 import sys
+from typing import NamedTuple
 from ctypes import Structure, byref, c_char, c_int, c_int64, c_size_t, c_void_p, POINTER, sizeof, c_ulonglong, c_uint64
 from enum import Enum
+
+
+@lru_cache(maxsize=1)
+def specs() -> HardwareSpecs:
+    """Collect hardware information from the current machine."""
+    gpu, gpu_vram = local_llm_vram()
+    return HardwareSpecs(
+        total_ram_gb=ram() / 1024.0 if ram() else 0,
+        cpu_physical_cores=cpu_core_count(),
+        gpu_vram_gb=gpu_vram / 1024.0 if gpu_vram else 0,
+        gpu=gpu,
+        available_disk_space_gb=available_disk_space() / (1024**3) if available_disk_space() else None
+    )
 
 
 class GPU(Enum):
@@ -17,6 +33,21 @@ class GPU(Enum):
     NVIDIA = 1
     AMD = 2
     APPLE_SILICON = 3
+
+
+class HardwareSpecs(NamedTuple):
+    """Snapshot of the user's hardware relevant to local LLM selection."""
+
+    total_ram_gb: float
+    cpu_physical_cores: int
+    gpu: GPU = GPU.UNKNOWN
+    gpu_vram_gb: float = 0.0
+    available_disk_space_gb: float = 0.0
+
+    @property
+    def has_gpu(self) -> bool:
+        """Return True if a GPU with at least 1GB of VRAM is available."""
+        return (self.gpu_vram_gb or 0) >= 1.0
 
 
 def available_disk_space() -> int:
@@ -87,7 +118,7 @@ def local_llm_vram() -> (GPU, int):
                         if err == 0:
                             total_vram += prop.totalGlobalMem
                     return (GPU.NVIDIA, total_vram // (1024 * 1024))
-                except:
+                except Exception:
                     print("Unable to determine VRAM for NVIDIA GPU")
                     return (GPU.NVIDIA, 0)
             else:
@@ -105,7 +136,7 @@ def local_llm_vram() -> (GPU, int):
                         if err == 0:
                             total_vram += prop.totalGlobalMem
                     return (GPU.AMD, total_vram // (1024 * 1024))
-                except:
+                except Exception:
                     print("Unable to determine VRAM for AMD GPU")
                     return (GPU.AMD, 0)
 
@@ -128,7 +159,7 @@ def local_llm_vram() -> (GPU, int):
                     vram_bytes = objc_lib.objc_msgSend(device, sel)
                     if vram_bytes > 0:
                         return (GPU.APPLE, vram_bytes // (1024 * 1024))
-                except:
+                except Exception:
                     print("Unable to determine universal memory for Apple Silicon")
                     return (GPU.APPLE, 0)
 
